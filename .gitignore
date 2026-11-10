@@ -1,0 +1,12 @@
+build/
+pico-sdk/
+.DS_Store
+*.uf2
+*.elf
+*.bin
+*.map
+*.dis
+*.hex
+tools/monitor_slave_to_smsl
+tools/e2e_audio_test
+

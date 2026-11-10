@@ -1,0 +1,65 @@
+; ============================================================================
+; Full-Duplex 32-bit Stereo (16-bit Left + 16-bit Right) I2S Bridge PIO
+; ============================================================================
+; Pin Mapping:
+;   GPIO 10 : BCLK  (Sideset bit 0 on Master, Input on Slave)
+;   GPIO 11 : LRCLK (Sideset bit 1 on Master, Input on Slave)
+;   GPIO 12 : DOUT  (OUT pin - Data transmitted to the other Pico's GPIO 13)
+;   GPIO 13 : DIN   (IN  pin - Data received from the other Pico's GPIO 12)
+;
+; Word Format (32-bit stereo frame in TX/RX FIFO, MSB-first):
+;   Bits [31:16] = Left Channel  (16-bit signed PCM)
+;   Bits [15:0]  = Right Channel (16-bit signed PCM)
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; 1. I2S Master Full-Duplex (Drives BCLK=10, LRCLK=11, DOUT=12; Samples DIN=13)
+; ----------------------------------------------------------------------------
+; Autopull = 32 bits (shift left), Autopush = 32 bits (shift left).
+; Every bit takes 3 PIO cycles:
+;   - 1 cycle: output DOUT on BCLK=0
+;   - 1 cycle: sample DIN on BCLK=1
+;   - 1 cycle: loop / setup on BCLK=1
+; PIO clock frequency = 48000 Hz * 32 bits * 3 cycles = 4.608 MHz.
+.program i2s_master_duplex
+.side_set 2
+
+.wrap_target
+    set x, 14           side 0b00 ; Prepare 15 loop iterations for Left channel [15..1]
+left_loop:
+    out pins, 1         side 0b00 ; Drive DOUT with Left bit [15..1] (BCLK=0, LRCLK=0)
+    in  pins, 1         side 0b01 ; Sample DIN on BCLK rising edge   (BCLK=1, LRCLK=0)
+    jmp x-- left_loop   side 0b01 ; Hold BCLK=1, loop 15 times
+    out pins, 1         side 0b00 ; Drive DOUT with Left bit [0]     (BCLK=0, LRCLK=0)
+    in  pins, 1         side 0b01 ; Sample DIN for Left bit [0]      (BCLK=1, LRCLK=0)
+
+    set x, 14           side 0b10 ; Prepare 15 loop iterations for Right channel [15..1]
+right_loop:
+    out pins, 1         side 0b10 ; Drive DOUT with Right bit [15..1] (BCLK=0, LRCLK=1)
+    in  pins, 1         side 0b11 ; Sample DIN on BCLK rising edge    (BCLK=1, LRCLK=1)
+    jmp x-- right_loop  side 0b11 ; Hold BCLK=1, loop 15 times
+    out pins, 1         side 0b10 ; Drive DOUT with Right bit [0]     (BCLK=0, LRCLK=1)
+    in  pins, 1         side 0b11 ; Sample DIN for Right bit [0]      (BCLK=1, LRCLK=1)
+.wrap
+
+; ----------------------------------------------------------------------------
+; 2. I2S Slave Full-Duplex (Follows BCLK=10, LRCLK=11; Drives DOUT=12; Samples DIN=13)
+; ----------------------------------------------------------------------------
+; Runs at full system clock (125 MHz) for <10ns edge tracking.
+; Self-synchronizes to LRCLK (GPIO 11) falling edge on EVERY 32-bit stereo frame
+; using explicit pull/push so hot-plugging or clock interruptions never cause bit slip.
+.program i2s_slave_duplex
+
+.wrap_target
+    wait 1 gpio 11      ; Wait for Right channel phase (LRCLK=1)
+    wait 0 gpio 11      ; Synchronize on LRCLK falling edge (start of Left channel, BCLK=0)
+    pull noblock        ; Load 32-bit stereo frame into OSR (resets OSR bit alignment every frame)
+    set x, 31           ; 32 bits per stereo frame (Left [31:16], Right [15:0])
+bit_loop:
+    wait 0 gpio 10      ; Wait for BCLK low
+    out pins, 1         ; Drive DOUT (GPIO 12) immediately
+    wait 1 gpio 10      ; Wait for BCLK rising edge
+    in  pins, 1         ; Sample DIN (GPIO 13) on BCLK rising edge
+    jmp x-- bit_loop
+    push noblock        ; Push 32-bit stereo frame to RX FIFO (resets ISR bit alignment every frame)
+.wrap
